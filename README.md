@@ -1,43 +1,82 @@
-# Wishpond September Churn Forecast
+# Wishpond Churn Forecast
 
-A responsive, read-only GitHub Pages dashboard for the `September Forecast` tab in the Wishpond churn workbook.
+A responsive GitHub Pages dashboard for every Google Sheets tab whose name ends in `Forecast`.
 
-## What was wrong
+The dashboard includes:
 
-The previous repository file was an exported Google Doc, not executable HTML. Its source contained escaped tags such as `&lt;html&gt;`, so GitHub Pages displayed the code instead of running the dashboard.
-
-The original guide and attached backend also expected a different sheet layout: seven columns with month-divider rows. The real `September Forecast` tab has a title row, headers on row 2, a section row on row 3, and 12 fields per client.
+- Month, AM, CSM, risk, brand, and preventable filters.
+- Separate Account, AM, and CSM columns.
+- AM and CSM dropdowns for reassignments.
+- Password-protected AM/CSM updates back to Google Sheets.
+- Forecast KPIs, churn reasons, account details, and CSV export.
+- Automatic header detection, so inserting rows above the table does not break the dashboard.
+- Support for both the older seven-column forecast tabs and the newer twelve-column layout.
 
 ## Files
 
-- `index.html` - accessible dashboard structure.
-- `styles.css` - responsive dashboard styles.
-- `app.js` - Google Sheets loading, normalization, filters, insights, table details, and CSV export.
-- `Code.gs` - recommended read-only Apps Script backend for the actual 12-column schema.
+- `index.html` — dashboard structure.
+- `styles.css` — responsive styles.
+- `app.js` — loading, filtering, display, CSV export, and reassignment saving.
+- `Code.gs` — Google Apps Script bridge for reading the forecast tabs and updating AM/CSM assignments.
 
-## Deploy the frontend
-
-GitHub Pages already targets this repository. Once these files are on `main`, the dashboard is available at:
-
-<https://qvintero.github.io/Wishpond-Churn/>
-
-GitHub Pages may take a minute or two to publish a new commit.
-
-## Update the Apps Script backend
-
-The current Apps Script deployment is compatible enough for the dashboard to load, but it serializes dates one day early and returns an empty duplicate September group. Replacing it with `Code.gs` fixes both issues.
+## One-time Apps Script setup
 
 1. Open the source Google Sheet.
 2. Select **Extensions → Apps Script**.
-3. Replace the editor contents with `Code.gs` and save.
-4. Select **Deploy → Manage deployments**.
-5. Edit the web-app deployment, choose **New version**, and select **Update**.
-6. Keep **Execute as: Me** and **Who has access: Anyone** if the dashboard must remain on public GitHub Pages.
+3. In the Apps Script editor, open `Code.gs`.
+4. Select all of its existing contents and delete them.
+5. Copy all of this repository's `Code.gs` file, including the opening comment, and paste it into the editor.
+6. Click **Save project**.
+7. In the left sidebar, click **Project Settings** (the gear icon).
+8. Scroll to **Script Properties** and click **Add script property**.
+9. Enter exactly:
+   - Property: `WRITE_SECRET`
+   - Value: a strong editing password that you will give only to approved dashboard editors
+10. Click **Save script properties**.
+11. Click **Deploy → Manage deployments**.
+12. Select the existing active web-app deployment and click its pencil icon.
+13. In **Version**, choose **New version**.
+14. Keep **Execute as: Me** and **Who has access: Anyone**.
+15. Click **Deploy** or **Update**.
 
-The existing `/exec` URL stays the same, so no frontend change is needed.
+The existing `/exec` web-app URL should stay the same. If Google creates a different URL, replace the `endpoint` value near the top of `app.js` with the new `/exec` URL.
 
-## Important privacy note
+## Publish the dashboard on GitHub Pages
 
-GitHub Pages is public, and an Apps Script web app accessible to `Anyone` makes the returned client data public to anyone who has or discovers its URL. This dashboard is intentionally read-only because a write secret embedded in a public web page is not a secret and would let visitors modify the spreadsheet.
+Upload or replace these four files in the root of the `Wishpond-Churn` repository:
 
-If the client names and CSM comments must stay internal, host the dashboard behind authentication instead of public GitHub Pages (for example, as an Apps Script HTML web app restricted to your Google Workspace organization).
+1. `index.html`
+2. `styles.css`
+3. `app.js`
+4. `Code.gs` (kept here as the Apps Script source/reference)
+
+Commit the changes to `main`. GitHub Pages should then publish:
+
+<https://qvintero.github.io/Wishpond-Churn/>
+
+## Using assignment editing
+
+1. Open the dashboard.
+2. Use the AM or CSM dropdown in any account row.
+3. Change as many assignments as needed.
+4. Click **Save assignments**.
+5. Enter the same password stored in the `WRITE_SECRET` Script Property.
+6. Wait for the “Changes saved” confirmation.
+
+Only names already assigned somewhere in a forecast tab appear in the dropdowns. To add a brand-new AM or CSM, first enter that name in one account in Google Sheets, then refresh the dashboard.
+
+The password is not written into the public GitHub files or saved in browser storage. It remains in the current page's memory until the page is refreshed or closed.
+
+## Sheet rules
+
+- Forecast tab names must end in ` Forecast`, for example `September Forecast`.
+- Required headers are `Client Name`, `AM`, `CSM`, `MRR`, and `Brand`.
+- The header row can move within the first 20 rows.
+- Optional modern columns include `Start date`, `Churn Date`, `Tenure (Months)`, `Risk`, `Main Reason for Churn`, `Preventable?`, and `Comments from CSM`.
+- Older `Reason for Churn` and `Status` headers are recognized automatically.
+
+## Security and privacy
+
+This remains a public GitHub Pages dashboard backed by an Apps Script web app accessible to `Anyone`. Anyone with the dashboard or Apps Script URL can read the forecast data. The edit password protects AM/CSM updates, but anyone who learns that password can make those two types of changes.
+
+Use a unique password, do not reuse a Google or company password, and change the `WRITE_SECRET` Script Property if it is shared accidentally. If the forecast itself must be private, use hosting with organization authentication instead of public GitHub Pages.

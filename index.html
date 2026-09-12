@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Wishpond September churn forecast dashboard">
+    <meta name="description" content="Wishpond churn forecast dashboard">
     <meta name="color-scheme" content="light">
-    <title>Wishpond | September Churn Forecast</title>
+    <title>Wishpond | Churn Forecast</title>
     <link rel="stylesheet" href="styles.css">
     <script src="app.js" defer></script>
   </head>
@@ -27,6 +27,9 @@
         <button class="button button-secondary" id="exportButton" type="button" disabled>
           Export CSV
         </button>
+        <button class="button button-save" id="saveAssignmentsButton" type="button" disabled>
+          Save assignments <span class="change-count" id="changeCount" hidden>0</span>
+        </button>
         <button class="button button-primary" id="refreshButton" type="button">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-14.7-4.6L3 9m1-6v6h6M4 13a8.1 8.1 0 0 0 14.7 4.6L21 15m-1 6v-6h-6"/></svg>
           Refresh data
@@ -38,19 +41,19 @@
       <section class="hero" aria-labelledby="pageTitle">
         <div>
           <p class="eyebrow">Customer success / Retention</p>
-          <h1 id="pageTitle">September forecast</h1>
+          <h1 id="pageTitle">Churn Forecast</h1>
           <p class="hero-copy">A focused view of confirmed churn and at-risk accounts, with the revenue, ownership, and context needed to prioritize retention work.</p>
         </div>
         <div class="snapshot">
           <span class="snapshot-label">Source</span>
-          <strong>September Forecast</strong>
+          <strong id="sourceLabel">All forecast tabs</strong>
           <span id="lastUpdated">Waiting for Google Sheets</span>
         </div>
       </section>
 
       <section class="notice notice-error" id="errorNotice" hidden aria-live="assertive">
         <div>
-          <strong>We couldn't load the forecast.</strong>
+          <strong>We couldn't complete that action.</strong>
           <p id="errorMessage">Check the Apps Script deployment and try again.</p>
         </div>
         <button class="button button-secondary" id="retryButton" type="button">Try again</button>
@@ -92,8 +95,16 @@
             <span>Search</span>
             <div class="input-shell">
               <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
-              <input id="searchInput" type="search" placeholder="Client, owner, reason, comment…" autocomplete="off">
+              <input id="searchInput" type="search" placeholder="Client, AM, CSM, reason, comment…" autocomplete="off">
             </div>
+          </label>
+          <label>
+            <span>Month</span>
+            <select id="monthFilter"><option value="">All months</option></select>
+          </label>
+          <label>
+            <span>AM</span>
+            <select id="amFilter"><option value="">All AMs</option></select>
           </label>
           <label>
             <span>Risk</span>
@@ -150,7 +161,7 @@
         <div class="table-heading">
           <div>
             <p class="section-kicker">Account detail</p>
-            <h2 id="accountsTitle">September accounts</h2>
+            <h2 id="accountsTitle">Forecast accounts</h2>
           </div>
           <span class="result-count" id="resultCount">Loading…</span>
         </div>
@@ -159,29 +170,51 @@
             <thead>
               <tr>
                 <th scope="col">Account</th>
-                <th scope="col">Owner</th>
+                <th scope="col">Month</th>
+                <th scope="col">AM</th>
+                <th scope="col">CSM</th>
                 <th scope="col">MRR</th>
                 <th scope="col">Brand</th>
                 <th scope="col">Risk</th>
                 <th scope="col">Churn date</th>
                 <th scope="col">Primary reason</th>
                 <th scope="col">Preventable</th>
-                <th scope="col"><span class="sr-only">Details</span></th>
+                <th scope="col">Details</th>
               </tr>
             </thead>
             <tbody id="accountRows">
-              <tr><td class="loading-cell" colspan="9">Loading the latest forecast…</td></tr>
+              <tr><td class="loading-cell" colspan="11">Loading the latest forecast…</td></tr>
             </tbody>
           </table>
         </div>
       </section>
 
-      <p class="privacy-note">Read-only dashboard. Edit source data in Google Sheets, then refresh this page.</p>
+      <p class="privacy-note">AM and CSM changes save directly to Google Sheets after password verification.</p>
     </main>
 
     <footer>
       <span>Wishpond Customer Success</span>
-      <span>September 2026 churn forecast</span>
+      <span>Churn forecast</span>
     </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <dialog class="password-dialog" id="passwordDialog">
+      <form method="dialog" id="passwordForm">
+        <div class="dialog-heading">
+          <p class="section-kicker">Protected update</p>
+          <h2>Enter the editing password</h2>
+          <p>The password is checked by Apps Script and is never stored in GitHub.</p>
+        </div>
+        <label>
+          <span>Editing password</span>
+          <input id="passwordInput" type="password" autocomplete="current-password" required>
+        </label>
+        <div class="dialog-actions">
+          <button class="button button-secondary" value="cancel" type="submit" formnovalidate>Cancel</button>
+          <button class="button button-primary" value="confirm" type="submit">Continue</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

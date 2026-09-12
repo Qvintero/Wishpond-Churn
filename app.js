@@ -2,41 +2,72 @@
 
 const CONFIG = Object.freeze({
   endpoint: "https://script.google.com/macros/s/AKfycbwTyNGC9SvJWqnstceylgb3O9mD9G2UysGsmJTbt4q47BY7xtSyq6m5G78tz1XFzMiNIw/exec",
-  sheetName: "September Forecast",
-  requestTimeoutMs: 15000,
+  requestTimeoutMs: 20000,
+  saveVerificationDelayMs: 1800,
 });
 
 const state = {
-  clients: [],
+  allClients: [],
   filtered: [],
+  months: [],
+  assignees: { ams: [], csms: [] },
+  pending: new Map(),
+  writeSecret: "",
+  isSaving: false,
   loadedAt: null,
-  filters: { search: "", risk: "", csm: "", brand: "", preventable: "", sort: "risk" },
+  filters: {
+    search: "",
+    month: "",
+    am: "",
+    csm: "",
+    risk: "",
+    brand: "",
+    preventable: "",
+    sort: "risk",
+  },
 };
+
 const elements = {};
+let passwordResolver = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   [
-    "connectionStatus", "connectionText", "lastUpdated", "errorNotice", "errorMessage",
-    "refreshButton", "retryButton", "exportButton", "clearFilters", "searchInput",
-    "riskFilter", "csmFilter", "brandFilter", "preventableFilter", "sortBy",
-    "totalMrr", "totalMrrNote", "confirmedMrr", "confirmedNote", "highRiskMrr",
-    "highRiskNote", "accountCount", "accountCountNote", "riskBreakdown",
-    "reasonBreakdown", "resultCount", "accountRows",
+    "connectionStatus", "connectionText", "lastUpdated", "sourceLabel", "errorNotice",
+    "errorMessage", "refreshButton", "retryButton", "exportButton", "saveAssignmentsButton",
+    "changeCount", "clearFilters", "searchInput", "monthFilter", "amFilter", "csmFilter",
+    "riskFilter", "brandFilter", "preventableFilter", "sortBy", "totalMrr", "totalMrrNote",
+    "confirmedMrr", "confirmedNote", "highRiskMrr", "highRiskNote", "accountCount",
+    "accountCountNote", "riskBreakdown", "reasonBreakdown", "resultCount", "accountRows",
+    "accountsTitle", "toast", "passwordDialog", "passwordForm", "passwordInput",
   ].forEach((id) => { elements[id] = document.getElementById(id); });
 
-  elements.refreshButton.addEventListener("click", loadForecast);
-  elements.retryButton.addEventListener("click", loadForecast);
+  elements.refreshButton.addEventListener("click", requestRefresh);
+  elements.retryButton.addEventListener("click", requestRefresh);
   elements.exportButton.addEventListener("click", exportCsv);
+  elements.saveAssignmentsButton.addEventListener("click", saveAssignments);
   elements.clearFilters.addEventListener("click", resetFilters);
   elements.searchInput.addEventListener("input", (event) => updateFilter("search", event.target.value));
-  elements.riskFilter.addEventListener("change", (event) => updateFilter("risk", event.target.value));
+  elements.monthFilter.addEventListener("change", (event) => updateFilter("month", event.target.value));
+  elements.amFilter.addEventListener("change", (event) => updateFilter("am", event.target.value));
   elements.csmFilter.addEventListener("change", (event) => updateFilter("csm", event.target.value));
+  elements.riskFilter.addEventListener("change", (event) => updateFilter("risk", event.target.value));
   elements.brandFilter.addEventListener("change", (event) => updateFilter("brand", event.target.value));
   elements.preventableFilter.addEventListener("change", (event) => updateFilter("preventable", event.target.value));
   elements.sortBy.addEventListener("change", (event) => updateFilter("sort", event.target.value));
+  elements.accountRows.addEventListener("change", handleAssignmentChange);
   elements.accountRows.addEventListener("toggle", handleDetailToggle, true);
+  elements.passwordForm.addEventListener("submit", handlePasswordSubmit);
+  elements.passwordDialog.addEventListener("cancel", handlePasswordCancel);
+  window.addEventListener("beforeunload", warnAboutUnsavedChanges);
+
   loadForecast();
 });
+
+async function requestRefresh() {
+  if (state.isSaving) return;
+  if (state.pending.size && !window.confirm("Refresh and discard the unsaved AM/CSM changes?")) return;
+  await loadForecast();
+}
 
 async function loadForecast() {
   setConnection("loading", "Refreshing");
@@ -44,26 +75,42 @@ async function loadForecast() {
   elements.errorNotice.hidden = true;
 
   try {
-    const response = await jsonp(CONFIG.endpoint, { sheet: CONFIG.sheetName, t: Date.now() });
-    if (!response || response.ok !== true || !response.data) {
-      throw new Error(response && response.error ? response.error : "The data service returned an invalid response.");
-    }
-    state.clients = normalizeResponse(response.data);
+    const response = await fetchForecast();
+    installResponse(response.data, true);
     state.loadedAt = new Date();
-    populateFilters();
-    applyFilters();
     elements.exportButton.disabled = false;
     setConnection("online", "Live data");
     elements.lastUpdated.textContent = `Updated ${formatTime(state.loadedAt)}`;
   } catch (error) {
     console.error("Forecast load failed", error);
     setConnection("error", "Connection issue");
-    elements.errorMessage.textContent = friendlyError(error);
-    elements.errorNotice.hidden = false;
-    if (!state.clients.length) renderEmptyState("No forecast data is available yet.");
+    showError(friendlyError(error));
+    if (!state.allClients.length) renderEmptyState("No forecast data is available yet.");
   } finally {
     elements.refreshButton.disabled = false;
   }
+}
+
+async function fetchForecast() {
+  const response = await jsonp(CONFIG.endpoint, { t: Date.now() });
+  if (!response || response.ok !== true || !response.data) {
+    throw new Error(response && response.error ? response.error : "The data service returned an invalid response.");
+  }
+  return response;
+}
+
+function installResponse(data, clearPending) {
+  const normalized = normalizeResponse(data);
+  state.allClients = normalized.clients;
+  state.months = normalized.months;
+  state.assignees = {
+    ams: sortedUnique([...(data.assignees && data.assignees.ams || []), ...state.allClients.map((client) => client.am)]),
+    csms: sortedUnique([...(data.assignees && data.assignees.csms || []), ...state.allClients.map((client) => client.csm)]),
+  };
+  if (clearPending) state.pending.clear();
+  populateFilters();
+  updatePendingUi();
+  applyFilters();
 }
 
 function jsonp(url, params = {}) {
@@ -72,12 +119,14 @@ function jsonp(url, params = {}) {
     const script = document.createElement("script");
     const timeout = window.setTimeout(() => finish(new Error("The Google Sheets request timed out.")), CONFIG.requestTimeoutMs);
     const query = new URLSearchParams({ ...params, callback: callbackName });
+
     function finish(error, value) {
       window.clearTimeout(timeout);
       script.remove();
       delete window[callbackName];
       if (error) reject(error); else resolve(value);
     }
+
     window[callbackName] = (value) => finish(null, value);
     script.onerror = () => finish(new Error("The browser could not reach the Google Apps Script deployment."));
     script.src = `${url}?${query.toString()}`;
@@ -86,29 +135,50 @@ function jsonp(url, params = {}) {
 }
 
 function normalizeResponse(data) {
-  const groups = Array.isArray(data.clients) ? [data] : Array.isArray(data.months) ? data.months : [];
-  return groups.flatMap((group) => Array.isArray(group.clients) ? group.clients : [])
-    .filter((row) => clean(row.client || row.clientName))
-    .map((row, index) => {
-      const startDate = normalizeDate(row.startDate);
-      const churnDate = normalizeDate(row.churnDate);
-      const tenure = toNumber(row.tenureMonths || row.tenure) || calculateTenure(startDate, churnDate);
-      return {
-        id: `${clean(row.client || row.clientName)}-${index}`,
-        client: clean(row.client || row.clientName),
-        am: clean(row.am),
-        csm: clean(row.csm),
-        mrr: toNumber(row.mrr),
-        brand: clean(row.brand),
-        startDate,
-        churnDate,
-        tenure,
-        risk: clean(row.risk) || "Not classified",
-        reason: clean(row.mainReasonForChurn || row.reason),
-        preventable: clean(row.preventable) || "Unclear",
-        comments: clean(row.commentsFromCsm || row.comments),
-      };
-    });
+  const groups = Array.isArray(data.months)
+    ? data.months
+    : Array.isArray(data.clients)
+      ? [{ name: data.month || "Forecast", sheetName: data.sheetName || "", clients: data.clients }]
+      : [];
+
+  const months = groups
+    .filter((group) => Array.isArray(group.clients) && group.clients.length)
+    .map((group) => ({ name: clean(group.name || group.month || group.sheetName), sheetName: clean(group.sheetName) }));
+
+  const clients = groups.flatMap((group) => {
+    const month = clean(group.name || group.month || group.sheetName.replace(/ Forecast$/i, ""));
+    const sheetName = clean(group.sheetName || `${month} Forecast`);
+    return (Array.isArray(group.clients) ? group.clients : [])
+      .filter((row) => clean(row.client || row.clientName))
+      .map((row, index) => normalizeClient(row, { month, sheetName, index }));
+  });
+
+  return { clients, months };
+}
+
+function normalizeClient(row, context) {
+  const startDate = normalizeDate(row.startDate);
+  const churnDate = normalizeDate(row.churnDate);
+  const tenure = toNumber(row.tenureMonths || row.tenure) || calculateTenure(startDate, churnDate);
+  const rowNumber = Number(row.rowNumber) || 0;
+  return {
+    id: rowNumber ? `${context.sheetName}:${rowNumber}` : `${context.sheetName}:${clean(row.client || row.clientName)}:${context.index}`,
+    sheetName: context.sheetName,
+    month: context.month,
+    rowNumber,
+    client: clean(row.client || row.clientName),
+    am: clean(row.am),
+    csm: clean(row.csm),
+    mrr: toNumber(row.mrr),
+    brand: clean(row.brand),
+    startDate,
+    churnDate,
+    tenure,
+    risk: clean(row.risk || row.status) || "Not classified",
+    reason: clean(row.mainReasonForChurn || row.reason),
+    preventable: clean(row.preventable) || "Unclear",
+    comments: clean(row.commentsFromCsm || row.comments),
+  };
 }
 
 function clean(value) { return String(value == null ? "" : value).trim().replace(/[ \t]+/g, " "); }
@@ -125,7 +195,6 @@ function normalizeDate(value) {
   if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
   const parsed = new Date(text);
   if (Number.isNaN(parsed.getTime())) return text;
-  // The legacy endpoint stringifies Sheet dates late on the prior day.
   if (/\bGMT[+-]\d{4}\b/.test(text)) parsed.setUTCDate(parsed.getUTCDate() + 1);
   return parsed.toISOString().slice(0, 10);
 }
@@ -140,24 +209,39 @@ function calculateTenure(startDate, endDate) {
 }
 
 function populateFilters() {
-  setOptions(elements.riskFilter, unique("risk"), "All risk levels");
+  const previousMonth = state.filters.month;
+  setMonthOptions(elements.monthFilter, state.months, "All months");
+  if (!state.months.some((month) => month.sheetName === previousMonth)) state.filters.month = "";
+  setOptions(elements.amFilter, unique("am"), "All AMs");
   setOptions(elements.csmFilter, unique("csm"), "All CSMs");
+  setOptions(elements.riskFilter, unique("risk"), "All risk levels");
   setOptions(elements.brandFilter, unique("brand"), "All brands");
   setOptions(elements.preventableFilter, unique("preventable"), "All answers");
 }
-function unique(field) { return [...new Set(state.clients.map((client) => client[field]).filter(Boolean))].sort((a, b) => a.localeCompare(b)); }
+
+function unique(field) { return sortedUnique(state.allClients.map((client) => client[field])); }
+function sortedUnique(values) { return [...new Set(values.map(clean).filter(Boolean))].sort((a, b) => a.localeCompare(b)); }
+
 function setOptions(select, values, firstLabel) {
   const previous = select.value;
   select.innerHTML = `<option value="">${escapeHtml(firstLabel)}</option>${values.map((value) => `<option value="${escapeAttribute(value)}">${escapeHtml(value)}</option>`).join("")}`;
   if (values.includes(previous)) select.value = previous;
 }
 
+function setMonthOptions(select, months, firstLabel) {
+  const previous = select.value;
+  select.innerHTML = `<option value="">${escapeHtml(firstLabel)}</option>${months.map((month) => `<option value="${escapeAttribute(month.sheetName)}">${escapeHtml(month.name)}</option>`).join("")}`;
+  if (months.some((month) => month.sheetName === previous)) select.value = previous;
+}
+
 function updateFilter(key, value) { state.filters[key] = value; applyFilters(); }
 function resetFilters() {
-  state.filters = { search: "", risk: "", csm: "", brand: "", preventable: "", sort: "risk" };
+  state.filters = { search: "", month: "", am: "", csm: "", risk: "", brand: "", preventable: "", sort: "risk" };
   elements.searchInput.value = "";
-  elements.riskFilter.value = "";
+  elements.monthFilter.value = "";
+  elements.amFilter.value = "";
   elements.csmFilter.value = "";
+  elements.riskFilter.value = "";
   elements.brandFilter.value = "";
   elements.preventableFilter.value = "";
   elements.sortBy.value = "risk";
@@ -166,17 +250,27 @@ function resetFilters() {
 
 function applyFilters() {
   const query = state.filters.search.trim().toLocaleLowerCase();
-  const matches = state.clients.filter((client) => {
-    if (state.filters.risk && client.risk !== state.filters.risk) return false;
+  const matches = state.allClients.filter((client) => {
+    if (state.filters.month && client.sheetName !== state.filters.month) return false;
+    if (state.filters.am && client.am !== state.filters.am) return false;
     if (state.filters.csm && client.csm !== state.filters.csm) return false;
+    if (state.filters.risk && client.risk !== state.filters.risk) return false;
     if (state.filters.brand && client.brand !== state.filters.brand) return false;
     if (state.filters.preventable && client.preventable !== state.filters.preventable) return false;
     if (!query) return true;
-    return [client.client, client.am, client.csm, client.brand, client.risk, client.reason, client.comments]
+    return [client.client, client.month, client.am, client.csm, client.brand, client.risk, client.reason, client.comments]
       .some((value) => value.toLocaleLowerCase().includes(query));
   });
+
   state.filtered = matches.sort(sortClients(state.filters.sort));
+  updateViewLabels();
   renderDashboard();
+}
+
+function updateViewLabels() {
+  const selectedMonth = state.months.find((month) => month.sheetName === state.filters.month);
+  elements.sourceLabel.textContent = selectedMonth ? selectedMonth.sheetName : plural(state.months.length, "forecast tab");
+  elements.accountsTitle.textContent = selectedMonth ? `${selectedMonth.name} accounts` : "Forecast accounts";
 }
 
 function sortClients(sort) {
@@ -186,19 +280,21 @@ function sortClients(sort) {
   if (sort === "client") return byClient;
   return (a, b) => riskOrder(a.risk) - riskOrder(b.risk) || b.mrr - a.mrr || byClient(a, b);
 }
+
 function riskOrder(risk) {
   const value = risk.toLocaleLowerCase();
-  if (value.includes("confirmed")) return 0;
+  if (value.includes("confirmed") || value.includes("cancelled")) return 0;
   if (value.includes("high")) return 1;
   if (value.includes("medium")) return 2;
   return 3;
 }
 
 function renderDashboard() { renderSummary(); renderRiskBreakdown(); renderReasonBreakdown(); renderRows(); }
+
 function renderSummary() {
   const visible = state.filtered;
   const totalMrr = sumMrr(visible);
-  const confirmed = visible.filter((client) => client.risk.toLocaleLowerCase().includes("confirmed"));
+  const confirmed = visible.filter((client) => isConfirmed(client.risk));
   const highRisk = visible.filter((client) => client.risk.toLocaleLowerCase().includes("high"));
   elements.totalMrr.textContent = formatMoney(totalMrr);
   elements.totalMrrNote.textContent = `Across ${plural(visible.length, "visible account")}`;
@@ -207,26 +303,29 @@ function renderSummary() {
   elements.highRiskMrr.textContent = formatMoney(sumMrr(highRisk));
   elements.highRiskNote.textContent = `${plural(highRisk.length, "high-risk account")} · ${percent(sumMrr(highRisk), totalMrr)} of visible MRR`;
   elements.accountCount.textContent = String(visible.length);
-  elements.accountCountNote.textContent = visible.length === state.clients.length ? "All forecast accounts" : `${state.clients.length - visible.length} filtered out`;
+  elements.accountCountNote.textContent = visible.length === state.allClients.length ? "All forecast accounts" : `${state.allClients.length - visible.length} filtered out`;
 }
 
 function renderRiskBreakdown() {
   const groups = [
-    { label: "Confirmed churned", test: (risk) => risk.includes("confirmed"), color: "var(--danger)" },
-    { label: "High risk", test: (risk) => risk.includes("high"), color: "var(--warning)" },
-    { label: "Medium risk", test: (risk) => risk.includes("medium"), color: "#d6a91c" },
-    { label: "Not classified", test: (risk) => !risk.includes("confirmed") && !risk.includes("high") && !risk.includes("medium"), color: "var(--faint)" },
+    { label: "Confirmed churned", test: isConfirmed, color: "var(--danger)" },
+    { label: "High risk", test: (risk) => risk.toLocaleLowerCase().includes("high"), color: "var(--warning)" },
+    { label: "Medium risk", test: (risk) => risk.toLocaleLowerCase().includes("medium"), color: "#d6a91c" },
+    { label: "Other / not classified", test: (risk) => riskOrder(risk) === 3, color: "var(--faint)" },
   ];
-  const max = Math.max(1, ...groups.map((group) => state.filtered.filter((client) => group.test(client.risk.toLocaleLowerCase())).length));
+  const max = Math.max(1, ...groups.map((group) => state.filtered.filter((client) => group.test(client.risk)).length));
   elements.riskBreakdown.innerHTML = groups.map((group) => {
-    const clients = state.filtered.filter((client) => group.test(client.risk.toLocaleLowerCase()));
+    const clients = state.filtered.filter((client) => group.test(client.risk));
     return `<div class="risk-row"><span class="risk-name"><span class="risk-swatch" style="background:${group.color}"></span>${escapeHtml(group.label)}</span><div class="risk-track"><div class="risk-fill" style="width:${(clients.length / max) * 100}%;background:${group.color}"></div></div><span class="risk-value">${clients.length} / ${formatMoney(sumMrr(clients))}</span></div>`;
   }).join("");
 }
 
 function renderReasonBreakdown() {
   const counts = new Map();
-  state.filtered.forEach((client) => { const reason = client.reason || "No reason provided"; counts.set(reason, (counts.get(reason) || 0) + 1); });
+  state.filtered.forEach((client) => {
+    const reason = client.reason || "No reason provided";
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  });
   const reasons = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 6);
   const max = Math.max(1, ...reasons.map(([, count]) => count));
   elements.reasonBreakdown.innerHTML = reasons.length
@@ -237,11 +336,18 @@ function renderReasonBreakdown() {
 function renderRows() {
   elements.resultCount.textContent = `${plural(state.filtered.length, "account")} shown`;
   if (!state.filtered.length) { renderEmptyState("No accounts match the current filters."); return; }
+
   elements.accountRows.innerHTML = state.filtered.map((client, index) => {
     const rowId = `detail-${index}`;
-    return `<tr class="data-row">
+    const pending = state.pending.get(client.id);
+    const amChanged = pending && pending.am !== pending.originalAm;
+    const csmChanged = pending && pending.csm !== pending.originalCsm;
+    const canEdit = Boolean(client.rowNumber) && !state.isSaving;
+    return `<tr class="data-row${pending ? " dirty" : ""}">
       <td><span class="account-name">${escapeHtml(client.client)}<small>${client.tenure ? `${client.tenure} month tenure` : "Tenure unavailable"}</small></span></td>
-      <td><span class="owner">${escapeHtml(client.csm || "Unassigned")}<small>AM: ${escapeHtml(client.am || "—")}</small></span></td>
+      <td><span class="month-pill">${escapeHtml(client.month)}</span></td>
+      <td>${assignmentSelect(client, "am", state.assignees.ams, amChanged, canEdit)}</td>
+      <td>${assignmentSelect(client, "csm", state.assignees.csms, csmChanged, canEdit)}</td>
       <td class="money">${formatMoney(client.mrr)}</td>
       <td>${escapeHtml(client.brand || "—")}</td>
       <td><span class="pill ${riskClass(client.risk)}">${escapeHtml(client.risk)}</span></td>
@@ -250,7 +356,7 @@ function renderRows() {
       <td><span class="pill ${preventableClass(client.preventable)}">${escapeHtml(client.preventable)}</span></td>
       <td><details class="details-toggle" data-target="${rowId}"><summary aria-label="Show details for ${escapeAttribute(client.client)}"></summary></details></td>
     </tr>
-    <tr class="detail-row" id="${rowId}"><td colspan="9"><div class="detail-card">
+    <tr class="detail-row" id="${rowId}"><td colspan="11"><div class="detail-card">
       <div class="detail-item"><span>Start date</span><strong>${escapeHtml(formatDate(client.startDate))}</strong></div>
       <div class="detail-item"><span>Forecast date</span><strong>${escapeHtml(formatDate(client.churnDate))}</strong></div>
       <div class="detail-item"><span>Tenure</span><strong>${client.tenure ? `${client.tenure} months` : "—"}</strong></div>
@@ -259,33 +365,178 @@ function renderRows() {
   }).join("");
 }
 
+function assignmentSelect(client, field, values, changed, canEdit) {
+  const current = client[field];
+  const options = sortedUnique([...values, current]);
+  return `<select class="assignment-select${changed ? " changed" : ""}" data-client-id="${escapeAttribute(client.id)}" data-field="${field}" aria-label="${field.toUpperCase()} for ${escapeAttribute(client.client)}"${canEdit ? "" : " disabled title=\"Update Apps Script before editing assignments\""}>
+    <option value="">Unassigned</option>
+    ${options.map((value) => `<option value="${escapeAttribute(value)}"${value === current ? " selected" : ""}>${escapeHtml(value)}</option>`).join("")}
+  </select>`;
+}
+
+function handleAssignmentChange(event) {
+  if (state.isSaving) return;
+  const select = event.target.closest(".assignment-select");
+  if (!select) return;
+  const client = state.allClients.find((item) => item.id === select.dataset.clientId);
+  if (!client) return;
+
+  const field = select.dataset.field;
+  let pending = state.pending.get(client.id);
+  if (!pending) {
+    pending = {
+      id: client.id,
+      sheetName: client.sheetName,
+      rowNumber: client.rowNumber,
+      client: client.client,
+      originalAm: client.am,
+      originalCsm: client.csm,
+      am: client.am,
+      csm: client.csm,
+    };
+  }
+
+  pending[field] = select.value;
+  client[field] = select.value;
+  if (pending.am === pending.originalAm && pending.csm === pending.originalCsm) state.pending.delete(client.id);
+  else state.pending.set(client.id, pending);
+  updatePendingUi();
+  applyFilters();
+}
+
+function updatePendingUi() {
+  const count = state.pending.size;
+  elements.saveAssignmentsButton.disabled = count === 0;
+  elements.changeCount.hidden = count === 0;
+  elements.changeCount.textContent = String(count);
+}
+
+async function saveAssignments() {
+  if (!state.pending.size) return;
+  const secret = state.writeSecret || await requestPassword();
+  if (!secret) return;
+  state.writeSecret = secret;
+  const updates = [...state.pending.values()].map((item) => ({
+    sheetName: item.sheetName,
+    rowNumber: item.rowNumber,
+    client: item.client,
+    am: item.am,
+    csm: item.csm,
+  }));
+
+  elements.saveAssignmentsButton.disabled = true;
+  elements.refreshButton.disabled = true;
+  state.isSaving = true;
+  renderRows();
+  setConnection("loading", "Saving changes");
+  elements.errorNotice.hidden = true;
+
+  try {
+    await fetch(CONFIG.endpoint, {
+      method: "POST",
+      mode: "no-cors",
+      cache: "no-store",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify({ writeSecret: secret, updates }),
+    });
+    await delay(CONFIG.saveVerificationDelayMs);
+    const response = await fetchForecast();
+    verifySavedUpdates(updates, normalizeResponse(response.data).clients);
+    installResponse(response.data, true);
+    state.loadedAt = new Date();
+    elements.lastUpdated.textContent = `Updated ${formatTime(state.loadedAt)}`;
+    setConnection("online", "Changes saved");
+    toast(`${plural(updates.length, "assignment")} saved to Google Sheets.`, "success");
+  } catch (error) {
+    console.error("Assignment save failed", error);
+    state.writeSecret = "";
+    setConnection("error", "Save failed");
+    showError(friendlySaveError(error));
+    toast("The assignment changes were not saved.", "error");
+  } finally {
+    state.isSaving = false;
+    elements.refreshButton.disabled = false;
+    updatePendingUi();
+    renderRows();
+  }
+}
+
+function verifySavedUpdates(updates, freshClients) {
+  const failures = updates.filter((update) => {
+    const saved = freshClients.find((client) => client.sheetName === update.sheetName && client.rowNumber === update.rowNumber && client.client === update.client);
+    return !saved || saved.am !== update.am || saved.csm !== update.csm;
+  });
+  if (failures.length) throw new Error("The server did not confirm the changes. The editing password may be incorrect, or Apps Script may need to be redeployed.");
+}
+
+function requestPassword() {
+  return new Promise((resolve) => {
+    passwordResolver = resolve;
+    elements.passwordInput.value = "";
+    elements.passwordDialog.showModal();
+    window.setTimeout(() => elements.passwordInput.focus(), 0);
+  });
+}
+
+function handlePasswordSubmit(event) {
+  event.preventDefault();
+  const confirmed = event.submitter && event.submitter.value === "confirm";
+  const value = confirmed ? elements.passwordInput.value : "";
+  elements.passwordDialog.close();
+  if (passwordResolver) passwordResolver(value);
+  passwordResolver = null;
+}
+
+function handlePasswordCancel(event) {
+  event.preventDefault();
+  elements.passwordDialog.close();
+  if (passwordResolver) passwordResolver("");
+  passwordResolver = null;
+}
+
 function handleDetailToggle(event) {
   const details = event.target;
   if (!(details instanceof HTMLDetailsElement)) return;
   const row = document.getElementById(details.dataset.target);
   if (row) row.classList.toggle("visible", details.open);
 }
+
+function warnAboutUnsavedChanges(event) {
+  if (!state.pending.size) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
 function renderEmptyState(message) {
-  elements.accountRows.innerHTML = `<tr><td class="empty-cell" colspan="9">${escapeHtml(message)}</td></tr>`;
+  elements.accountRows.innerHTML = `<tr><td class="empty-cell" colspan="11">${escapeHtml(message)}</td></tr>`;
   elements.resultCount.textContent = "0 accounts shown";
 }
 
 function exportCsv() {
-  const headers = ["Client Name", "AM", "CSM", "MRR", "Brand", "Start date", "Churn Date", "Tenure (Months)", "Risk", "Main Reason for Churn", "Preventable?", "Comments from CSM"];
-  const rows = state.filtered.map((client) => [client.client, client.am, client.csm, client.mrr, client.brand, client.startDate, client.churnDate, client.tenure || "", client.risk, client.reason, client.preventable, client.comments]);
+  const headers = ["Month", "Client Name", "AM", "CSM", "MRR", "Brand", "Start date", "Churn Date", "Tenure (Months)", "Risk", "Main Reason for Churn", "Preventable?", "Comments from CSM"];
+  const rows = state.filtered.map((client) => [client.month, client.client, client.am, client.csm, client.mrr, client.brand, client.startDate, client.churnDate, client.tenure || "", client.risk, client.reason, client.preventable, client.comments]);
   const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
   const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = "wishpond-september-forecast.csv";
+  link.download = `wishpond-churn-forecast${state.filters.month ? `-${slugify(elements.monthFilter.selectedOptions[0].textContent)}` : ""}.csv`;
   link.click();
   URL.revokeObjectURL(link.href);
 }
 
+function showError(message) { elements.errorMessage.textContent = message; elements.errorNotice.hidden = false; }
+function toast(message, type) {
+  elements.toast.textContent = message;
+  elements.toast.className = `toast show ${type || ""}`;
+  window.clearTimeout(elements.toast.timeout);
+  elements.toast.timeout = window.setTimeout(() => { elements.toast.className = "toast"; }, 3500);
+}
+function delay(milliseconds) { return new Promise((resolve) => window.setTimeout(resolve, milliseconds)); }
 function csvCell(value) { return `"${String(value == null ? "" : value).replace(/"/g, '""')}"`; }
 function sumMrr(clients) { return clients.reduce((total, client) => total + client.mrr, 0); }
 function plural(value, word) { return `${value} ${word}${value === 1 ? "" : "s"}`; }
 function percent(value, total) { return total ? `${Math.round((value / total) * 100)}%` : "0%"; }
+function isConfirmed(risk) { const value = risk.toLocaleLowerCase(); return value.includes("confirmed") || value.includes("cancelled"); }
 function formatMoney(value) { return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: value % 1 ? 2 : 0 }).format(value || 0); }
 function formatTime(date) { return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date); }
 function formatDate(value) {
@@ -296,7 +547,7 @@ function formatDate(value) {
 }
 function riskClass(risk) {
   const value = risk.toLocaleLowerCase();
-  if (value.includes("confirmed")) return "pill-danger";
+  if (value.includes("confirmed") || value.includes("cancelled")) return "pill-danger";
   if (value.includes("high")) return "pill-warning";
   if (value.includes("medium")) return "pill-medium";
   return "pill-neutral";
@@ -314,7 +565,11 @@ function friendlyError(error) {
   if (/reach/i.test(message)) return "Confirm the Apps Script deployment URL is current and its access is set to Anyone.";
   return message;
 }
-function escapeHtml(value) {
-  return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+function friendlySaveError(error) {
+  const message = error && error.message ? error.message : "Unknown save error.";
+  if (/server did not confirm/i.test(message)) return message;
+  return `Could not save the assignments: ${message}`;
 }
+function slugify(value) { return clean(value).toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
+function escapeHtml(value) { return String(value == null ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
 function escapeAttribute(value) { return escapeHtml(value).replace(/`/g, "&#096;"); }
